@@ -1,0 +1,15 @@
+services:
+  app:
+    build: ./app/
+    ports:
+      - "4173:4173"
+    environment:
+      - VITE_API_URL=http://server:8000
+
+    depends_on:
+      - server
+
+  server:
+    build: ./server/
+    ports:
+      - "8000:8000"
