@@ -1,140 +1,234 @@
-// src/lib/MapViewer.svelte
 <script lang="ts">
-  import Map from "ol/Map.js";
-  import OSM from "ol/source/OSM.js";
-  import TileLayer from "ol/layer/Tile.js";
-  import View from "ol/View.js";
-  import VectorLayer from "ol/layer/Vector.js";
-  import VectorSource from "ol/source/Vector.js";
-  import GeoJSON from "ol/format/GeoJSON.js";
-  import { Style, Fill, Stroke, Text } from "ol/style.js";
-  import { fromLonLat } from "ol/proj.js";
-  import { onMount, onDestroy } from "svelte";
-  
-  export let sessionId: string | null;
-  export let mapType: 'raw' | 'ref';
-  export let keyCol: string;
-  export let geojson: any;
-  export let bounds: number[]; // [minX, minY, maxX, maxY]
-  export let onSelect: (plotId: string) => void;
-  export let selected: string | null = null;
-  
+  import { onMount } from "svelte";
+  import Map from "ol/Map";
+  import View from "ol/View";
+  import TileLayer from "ol/layer/Tile";
+  import VectorLayer from "ol/layer/Vector";
+  import VectorSource from "ol/source/Vector";
+  import { fromLonLat, toLonLat } from "ol/proj";
+  import GeoJSON from "ol/format/GeoJSON";
+  import { Style, Stroke, Fill, Circle as CircleStyle, Text } from "ol/style";
+  import Feature from "ol/Feature";
+  import Point from "ol/geom/Point";
+  import { OSM } from "ol/source";
+
+  interface Props {
+    sessionId: string | null;
+    mapType: "raw" | "ref";
+    keyCol: string;
+    geojson: any;
+    bounds: number[];
+    onSelect: (coords: [number, number]) => void;
+    selectedPoint?: [number, number] | null; // Optional prop with default
+    pairs: Array<ControlPair>; // Optional prop with default
+  }
+
+  // Destructure props with default values
+  let {
+    sessionId,
+    mapType,
+    keyCol,
+    geojson,
+    bounds,
+    onSelect,
+    selectedPoint = null,
+    pairs = $bindable([]),
+  }: Props = $props();
+  type ControlPair = {
+    id: number;
+    color: string;
+    raw: [number, number];
+    ref: [number, number];
+  };
+
   let mapContainer: HTMLDivElement;
   let map: Map;
   let vectorLayer: VectorLayer<VectorSource>;
   let vectorSource: VectorSource;
-  
+  let pointsLayer: VectorLayer<VectorSource>;
+  let pointsSource: VectorSource;
+
   onMount(() => {
     // Calculate center from bounds
     const centerLon = (bounds[0] + bounds[2]) / 2;
     const centerLat = (bounds[1] + bounds[3]) / 2;
     const center = fromLonLat([centerLon, centerLat]);
-    
-    // Create vector source from GeoJSON
+
+    // Create vector source from GeoJSON (base layer with plots)
     vectorSource = new VectorSource({
       features: new GeoJSON().readFeatures(geojson, {
-        featureProjection: 'EPSG:3857'
-      })
+        featureProjection: "EPSG:3857",
+      }),
     });
-    
-    // Style function
-    const styleFunction = (feature: { get: (arg0: string) => any; }, resolution: any) => {
+
+    // Style for base geometries
+    const baseStyleFunction = (
+      feature: { get: (arg0: string) => any },
+      resolution: any,
+    ) => {
+      const color = mapType === "raw" ? "#ef4444" : "#22c55e";
       const plotId = feature.get(keyCol);
-      const isSelected = plotId === selected;
-      const color = mapType === 'raw' ? '#ef4444' : '#22c55e';
-      const selectedColor = '#f59e0b';
-      
+      // return new Style({
+      //   stroke: new Stroke({
+      //     color: color,
+      //     width: 2,
+      //   }),
+      //   fill: new Fill({
+      //     color:
+      //       mapType === "raw"
+      //         ? "rgba(239, 68, 68, 0.2)"
+      //         : "rgba(34, 197, 94, 0.2)",
+      //   }),
+
+      // });
+
       return new Style({
         stroke: new Stroke({
-          color: isSelected ? selectedColor : color,
-          width: isSelected ? 4 : 2
+          color: color,
+          width: 2,
         }),
         fill: new Fill({
-          color: isSelected 
-            ? 'rgba(245, 158, 11, 0.3)' 
-            : mapType === 'raw' 
-              ? 'rgba(239, 68, 68, 0.2)' 
-              : 'rgba(34, 197, 94, 0.2)'
+          color:
+            mapType === "raw"
+              ? "rgba(239, 68, 68, 0.2)"
+              : "rgba(34, 197, 94, 0.2)",
         }),
         text: new Text({
-          text: String(plotId),
-          font: '11px sans-serif',
+          text: plotId.toString(), // Ensure plotId is converted to string
+          font: "bold 12px Calibri,sans-serif", // Added font for better rendering
           fill: new Fill({
-            color: mapType === 'raw' ? '#dc2626' : '#16a34a'
+            color: mapType === "raw" ? "#dc2626" : "#16a34a",
           }),
           stroke: new Stroke({
-            color: '#ffffff',
-            width: 3
+            color: "#ffffff",
+            width: 3,
           }),
-          offsetY: 0
-        })
+          offsetY: 0,
+        }),
       });
     };
-    
-    // Create vector layer
+
+    // Create vector layer for base geometries
     vectorLayer = new VectorLayer({
       source: vectorSource,
-      style: styleFunction
+      style: baseStyleFunction,
     });
-    
+
+    // Create layer for user-selected points
+    pointsSource = new VectorSource();
+    pointsLayer = new VectorLayer({
+      source: pointsSource,
+      style: (feature) => {
+        const color = feature.get("color") || "#f59e0b";
+
+        return new Style({
+          image: new CircleStyle({
+            radius: 8,
+            fill: new Fill({ color }),
+            stroke: new Stroke({ color: "#fff", width: 3 }),
+          }),
+        });
+      },
+      zIndex: 10,
+    });
+
     // Initialize map
     map = new Map({
       target: mapContainer,
-      layers: [
-        new TileLayer(),
-        vectorLayer
-      ],
+      layers: [new TileLayer(), vectorLayer, pointsLayer],
       view: new View({
         center: center,
         zoom: 16,
       }),
     });
-    
+
     // Fit to bounds
     const extent = vectorSource.getExtent();
     map.getView().fit(extent, {
-      
-      maxZoom: 18
+      padding: [50, 50, 50, 50],
+      maxZoom: 18,
     });
-    
-    // Click handler
-    map.on('click', (evt) => {
-      map.forEachFeatureAtPixel(evt.pixel, (feature) => {
-        const plotId = feature.get(keyCol);
-        if (plotId) {
-          onSelect(String(plotId));
-        }
-        return true;
+
+    // Click handler - add point marker
+    map.on("click", (evt) => {
+      const coordinate = evt.coordinate;
+
+      // Get coordinates based on map type
+      let coords: [number, number];
+      if (mapType === "ref") {
+        // For reference map, convert to lon/lat
+        const lonLat = toLonLat(coordinate);
+        coords = [lonLat[0], lonLat[1]];
+      } else {
+        // For raw map, use pixel/map coordinates directly
+        coords = [coordinate[0], coordinate[1]];
+      }
+
+      // Add new point marker
+      const pointFeature = new Feature({
+        geometry: new Point(coordinate),
       });
+      pointsSource.addFeature(pointFeature);
+
+      // Notify parent component
+      onSelect(coords);
     });
-    
-    // Pointer cursor on hover
-    map.on('pointermove', (evt) => {
-      const hit = map.forEachFeatureAtPixel(evt.pixel, () => true);
-      map.getTargetElement().style.cursor = hit ? 'pointer' : '';
+
+    // Pointer cursor
+    map.on("pointermove", (evt) => {
+      map.getTargetElement().style.cursor = "crosshair";
     });
-  });
-  
-  onDestroy(() => {
-    if (map) {
+
+    return () => {
       map.setTarget(undefined);
-    }
+    };
   });
-  
-  // Update style when selected changes
-  $: if (vectorLayer && selected !== undefined) {
-    vectorLayer.changed();
-  }
+
+  const cleanPairs = $derived(
+    pairs.map((p) => {
+      const rawPoint = mapType === "raw" ? p.raw : p.ref;
+
+      // CRITICAL: If this is the REF map, we must convert Lon/Lat to Map Pixels (EPSG:3857)
+      const projectedPoint =
+        mapType === "ref" && rawPoint ? fromLonLat(rawPoint) : rawPoint;
+
+      return { color: p.color, point: projectedPoint };
+    }),
+  );
+
+  // Add Persistent Pairs
+
+  $effect(() => {
+    // Only run if map and source are ready
+    if (!pointsSource) return;
+
+    pointsSource.clear();
+
+    cleanPairs.forEach(({ color, point }) => {
+      if (!point) return;
+      const feature = new Feature({ geometry: new Point(point) });
+      feature.set("color", color);
+      pointsSource.addFeature(feature);
+    });
+
+    // Add Active Selected Point
+    // if (selectedPoint) {
+    //   const coord =
+    //     mapType === "ref"
+    //       ? fromLonLat([selectedPoint[0], selectedPoint[1]])
+    //       : [selectedPoint[0], selectedPoint[1]];
+
+    //   const feature = new Feature({ geometry: new Point(coord) });
+    //   // Optional: specific color for the "currently clicking" point
+    //   pointsSource.addFeature(feature);
+    // }
+  });
 </script>
 
-<div bind:this={mapContainer} class="w-full h-96 rounded-lg"></div>
+<div bind:this={mapContainer} class="w-full h-96"></div>
 
 <style>
-  div {
-    position: relative;
-  }
-  
   :global(.ol-viewport) {
-    border-radius: 0.5rem;
+    cursor: crosshair !important;
   }
 </style>

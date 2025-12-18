@@ -20,7 +20,7 @@ app = FastAPI(title="Georeferencing API")
 
 logger.remove()
 
-# Add a stylish, ready-to-parse sink
+
 logger.add(
     sys.stdout,
     level="DEBUG",
@@ -43,8 +43,6 @@ app.add_middleware(
 )
 
 
-UPLOAD_DIR = Path("/app/uploads")
-
 # Store session data (in production, use Redis or database)
 sessions = {}
 
@@ -64,11 +62,6 @@ class PairRequest(BaseModel):
     raw_id: str
     ref_id: str
 
-class TransformRequest(BaseModel):
-    session_id: str
-    raw_key: str
-    ref_key: str
-    pairs: List[Tuple[str, str]]
 
 class FeatureInfo(BaseModel):
     properties: dict
@@ -105,6 +98,12 @@ def safe_centroid(g):
     except Exception:
         return None
 
+
+class TransformRequest(BaseModel):
+    session_id: str
+    pairs: List[Tuple[Tuple[float, float], Tuple[float, float]]]  # [(raw_point, ref_point), ...]
+
+
 def compute_similarity_transform(src, dst):
     """Compute similarity transformation (scale, rotation, translation)"""
     src = np.asarray(src).reshape(-1, 2)
@@ -130,12 +129,14 @@ def compute_similarity_transform(src, dst):
     t = dst_mean - scale * (R @ src_mean)
     return scale, R, t
 
+
 def transform_point(x, y, model):
     """Transform a single point"""
     scale, R, t = model["scale"], model["R"], model["t"]
     p = np.array([x, y])
     P = scale * (R @ p) + t
     return float(P[0]), float(P[1])
+
 
 def transform_geom(g, model):
     """Transform geometry using similarity transform"""
@@ -157,6 +158,7 @@ def transform_geom(g, model):
         return MultiLineString([transform_geom(ls, model) for ls in g.geoms])
     
     return g
+
 
 def gdf_to_geojson(gdf: gpd.GeoDataFrame, key_col: str) -> dict:
     """Convert GeoDataFrame to GeoJSON with plot_id"""
@@ -295,51 +297,30 @@ async def get_ref_feature(session_id: str, key_col: str, feature_id: str):
         "geometry": json.loads(gpd.GeoSeries([feature.iloc[0].geometry]).to_json())
     }
 
+
+
 @app.post("/transform")
 async def apply_transformation(request: TransformRequest):
     """Apply similarity transformation and return georeferenced shapefile"""
     try:
-        print()
         if request.session_id not in sessions:
             raise HTTPException(status_code=404, detail="Session not found")
         
         if len(request.pairs) < 3:
-            raise HTTPException(status_code=400, detail="At least 3 control pairs required")
+            raise HTTPException(status_code=400, detail="At least 3 control point pairs required")
         
         raw = sessions[request.session_id]["raw"]
-        ref = sessions[request.session_id]["ref"]
         
-        raw_pts, ref_pts = [], []
+        print(request.pairs)
+        # Extract points directly from the pairs
+        raw_pts = np.array([pair[0] for pair in request.pairs])  # [(x, y), ...]
+        ref_pts = np.array([pair[1] for pair in request.pairs])  # [(lon, lat), ...]
         
-        for raw_id, ref_id in request.pairs:
-            g1 = raw.loc[raw[request.raw_key] == raw_id].geometry.values
-            g2 = ref.loc[ref[request.ref_key] == ref_id].geometry.values
-            
-            if len(g1) == 0 or len(g2) == 0:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Plot not found for pair RAW={raw_id}, REF={ref_id}"
-                )
-            
-            c1 = safe_centroid(g1[0])
-            c2 = safe_centroid(g2[0])
-            
-            if c1 is None or c2 is None:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Could not compute centroid for pair RAW={raw_id}, REF={ref_id}"
-                )
-            
-            raw_pts.append(c1)
-            ref_pts.append(c2)
-        
-        raw_pts = np.array(raw_pts)
-        ref_pts = np.array(ref_pts)
-        
+        # Compute transformation
         scale, R, t = compute_similarity_transform(raw_pts, ref_pts)
         model = {"scale": scale, "R": R, "t": t}
         
-        # Transform geometries
+        # Transform all geometries in the raw dataset
         raw_trans = raw.copy()
         raw_trans["geometry"] = raw.geometry.apply(lambda g: transform_geom(g, model))
         raw_trans = raw_trans.set_crs(4326)
@@ -369,6 +350,7 @@ async def apply_transformation(request: TransformRequest):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/session/{session_id}/info")
 async def get_session_info(session_id: str):
