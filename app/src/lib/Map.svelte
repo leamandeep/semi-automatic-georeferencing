@@ -10,7 +10,8 @@
   import { Style, Stroke, Fill, Circle as CircleStyle, Text } from "ol/style";
   import Feature from "ol/Feature";
   import Point from "ol/geom/Point";
-  import { OSM } from "ol/source";
+  import Draw from 'ol/interaction/Draw'
+  import Snap from "ol/interaction/Snap";
 
   interface Props {
     sessionId: string | null;
@@ -114,6 +115,13 @@
       style: baseStyleFunction,
     });
 
+    const snap = new Snap({
+      source: vectorSource,
+      edge: true,
+      vertex: true,
+      pixelTolerance: 20,
+    });
+
     // Create layer for user-selected points
     pointsSource = new VectorSource();
     pointsLayer = new VectorLayer({
@@ -149,33 +157,69 @@
       maxZoom: 18,
     });
 
-    // Click handler - add point marker
-    map.on("click", (evt) => {
-      const coordinate = evt.coordinate;
+    //  map.addInteraction(snap);
+    // // Click handler - add point marker
+    // map.on("click", (evt) => {
+    //   const coordinate = evt.coordinate;
 
-      // Get coordinates based on map type
+    //   // Get coordinates based on map type
+    //   let coords: [number, number];
+    //   if (mapType === "ref") {
+    //     // For reference map, convert to lon/lat
+    //     const lonLat = toLonLat(coordinate);
+    //     coords = [lonLat[0], lonLat[1]];
+    //   } else {
+    //     // For raw map, use pixel/map coordinates directly
+    //     coords = [coordinate[0], coordinate[1]];
+    //   }
+
+    //   // Add new point marker
+    //   const pointFeature = new Feature({
+    //     geometry: new Point(coordinate),
+    //   });
+    //   pointsSource.addFeature(pointFeature);
+
+    //   // Notify parent component
+    //   onSelect(coords);
+    // });
+
+    // // Pointer cursor
+    // map.on("pointermove", (evt) => {
+    //   map.getTargetElement().style.cursor = "crosshair";
+    // });
+
+    // 🟢 DRAW interaction (REPLACES click handler)
+    const drawPoint = new Draw({
+      source: pointsSource,
+      type: "Point",
+    });
+    map.addInteraction(drawPoint);
+
+    // // 🧲 SNAP interaction (THIS IS THE KEY)
+    // const snap = new Snap({
+    //   source: vectorSource, // snap to plot vertices
+    //   pixelTolerance: 10,
+    // });
+    map.addInteraction(snap);
+
+    // Capture snapped coordinate
+    drawPoint.on("drawend", (event) => {
+      const geometry = event.feature.getGeometry() as Point;
+      const coordinate = geometry.getCoordinates();
+
       let coords: [number, number];
       if (mapType === "ref") {
-        // For reference map, convert to lon/lat
         const lonLat = toLonLat(coordinate);
         coords = [lonLat[0], lonLat[1]];
       } else {
-        // For raw map, use pixel/map coordinates directly
         coords = [coordinate[0], coordinate[1]];
       }
 
-      // Add new point marker
-      const pointFeature = new Feature({
-        geometry: new Point(coordinate),
-      });
-      pointsSource.addFeature(pointFeature);
-
-      // Notify parent component
       onSelect(coords);
     });
 
-    // Pointer cursor
-    map.on("pointermove", (evt) => {
+    // Cursor
+    map.on("pointermove", () => {
       map.getTargetElement().style.cursor = "crosshair";
     });
 

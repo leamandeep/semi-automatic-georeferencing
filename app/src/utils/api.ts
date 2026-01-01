@@ -81,9 +81,9 @@ export const api = {
       throw new Error(error.detail || 'Transform failed');
     }
 
-    // Return blob for download
-    return response.blob();
-  },
+    // FIX: Return the WHOLE response so we can read headers in the component
+    return response; 
+},
 
   async getSessionInfo(sessionId: any) {
     const response = await fetch(`${API_BASE_URL}/session/${sessionId}/info`);
