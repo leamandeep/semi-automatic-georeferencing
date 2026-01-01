@@ -214,42 +214,62 @@ function nextColor(
     pendingRaw = null;
     pendingRef = null;
   }
-
-  async function applyTransformation() {
-    // @ts-ignore
-    if (pairs.length < 3) {
-      error = "At least 3 control pairs are required";
-      return;
-    }
-
-    loading = true;
-    error = null;
-
-    const cleanPairs = pairs.map((p) => [p.raw, p.ref]);
-
-    try {
-      const blob = await api.applyTransform(
-        sessionId,
-        rawKeyCol,
-        refKeyCol,
-        cleanPairs,
-      );
-
-      // Download the file
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "georef_final.zip";
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-    } catch (err) {
-      error = `Transform Error: ${err?.message}`;
-    } finally {
-      loading = false;
-    }
+async function applyTransformation() {
+  if (pairs.length < 3) {
+    error = "At least 3 control pairs are required";
+    return;
   }
+
+  loading = true;
+  error = null;
+  const cleanPairs = pairs.map((p) => [p.raw, p.ref]);
+
+  try {
+    const response = await api.applyTransform(
+      sessionId,
+      rawKeyCol,
+      refKeyCol,
+      cleanPairs,
+    );
+
+    // FIX: Check if response exists before calling .headers
+    if (!response || !response.headers) {
+      throw new Error("No response received from server");
+    }
+
+    // 1. Extract filename
+    const disposition = response.headers.get("Content-Disposition");
+    let filename = "georef_final.zip";
+
+    if (disposition && disposition.includes("filename=")) {
+      const match = disposition.match(/filename=(?:"([^"]+)"|([^;]+))/);
+      filename = match ? (match[1] || match[2]) : filename;
+    }
+
+    // 2. Get the blob
+    const blob = await response.blob();
+
+    // 3. Trigger download
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename; 
+    document.body.appendChild(a);
+    a.click();
+    
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+
+  } catch (err) {
+    console.error("Full Error:", err);
+    error = `Transform Error: ${err.message}`;
+  } finally {
+    loading = false;
+  }
+}
+
+
+
 
   function reset() {
     rawFile = null;

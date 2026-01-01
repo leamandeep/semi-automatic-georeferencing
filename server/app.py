@@ -1,6 +1,6 @@
 from pathlib import Path
 import sys
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, Request, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -40,6 +40,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"]
 )
 
 
@@ -171,7 +172,7 @@ def gdf_to_geojson(gdf: gpd.GeoDataFrame, key_col: str) -> dict:
 # ======================================================================
 
 @app.post("/upload/raw", response_model=UploadResponse)
-async def upload_raw(file: UploadFile = File(...)):
+async def upload_raw(request:Request, file: UploadFile = File(...)):
     """Upload RAW shapefile ZIP"""
 
     logger.info("Starting RAW shapefile upload for file: {}", file.filename)
@@ -179,7 +180,7 @@ async def upload_raw(file: UploadFile = File(...)):
         
         content = await file.read()
         logger.debug("File content read successfully. Size: {} bytes", len(content))
-
+        request.app.state.name = file.filename
         # Load GeoDataFrame
         gdf = load_shapefile_from_zip(content, file.filename)
         logger.info("Shapefile loaded successfully. Feature count: {}", len(gdf))
@@ -194,7 +195,8 @@ async def upload_raw(file: UploadFile = File(...)):
 
         sessions[session_id] = {
             "raw": gdf,
-            "raw_display": gdf_display
+            "raw_display": gdf_display,
+            "filename":file.filename
         }
         logger.info("GeoDataFrames stored in session: {}", session_id)
         
@@ -300,7 +302,7 @@ async def get_ref_feature(session_id: str, key_col: str, feature_id: str):
 
 
 @app.post("/transform")
-async def apply_transformation(request: TransformRequest):
+async def apply_transformation(r:Request,request: TransformRequest):
     """Apply similarity transformation and return georeferenced shapefile"""
     try:
         if request.session_id not in sessions:
@@ -327,7 +329,9 @@ async def apply_transformation(request: TransformRequest):
         
         # Create ZIP file with all shapefile components
         outdir = tempfile.mkdtemp()
-        shp_path = os.path.join(outdir, "georef_final.shp")
+        
+        filename = os.path.splitext(r.app.state.name)[0]
+        shp_path = os.path.join(outdir, f"{filename}_final.shp")
         raw_trans.to_file(shp_path)
         
         # Create ZIP
@@ -341,11 +345,10 @@ async def apply_transformation(request: TransformRequest):
         shutil.rmtree(outdir)
         
         zip_buffer.seek(0)
-        
         return StreamingResponse(
             zip_buffer,
             media_type="application/zip",
-            headers={"Content-Disposition": "attachment; filename=georef_final.zip"}
+            headers={"Content-Disposition": f"attachment; filename={filename}_final.zip"}
         )
         
     except Exception as e:
