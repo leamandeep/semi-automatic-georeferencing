@@ -10,7 +10,7 @@
   import { Style, Stroke, Fill, Circle as CircleStyle, Text } from "ol/style";
   import Feature from "ol/Feature";
   import Point from "ol/geom/Point";
-  import Draw from 'ol/interaction/Draw'
+  import Draw from "ol/interaction/Draw";
   import Snap from "ol/interaction/Snap";
 
   interface Props {
@@ -49,6 +49,8 @@
   let pointsLayer: VectorLayer<VectorSource>;
   let pointsSource: VectorSource;
 
+  console.log(geojson)
+
   onMount(() => {
     // Calculate center from bounds
     const centerLon = (bounds[0] + bounds[2]) / 2;
@@ -56,11 +58,18 @@
     const center = fromLonLat([centerLon, centerLat]);
 
     // Create vector source from GeoJSON (base layer with plots)
-    vectorSource = new VectorSource({
-      features: new GeoJSON().readFeatures(geojson, {
-        featureProjection: "EPSG:3857",
-      }),
-    });
+
+    if ("crs" in geojson) {
+      delete geojson.crs;
+      console.log("CRS removed");
+     
+    }
+
+     vectorSource = new VectorSource({
+        features: new GeoJSON().readFeatures(geojson, {
+          featureProjection: "EPSG:3857",
+        }),
+      });
 
     // Style for base geometries
     const baseStyleFunction = (
@@ -146,7 +155,7 @@
       layers: [new TileLayer(), vectorLayer, pointsLayer],
       view: new View({
         center: center,
-        zoom: 16,
+        zoom: 15,
       }),
     });
 

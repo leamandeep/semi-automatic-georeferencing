@@ -1,10 +1,13 @@
+import glob
 from pathlib import Path
 import sys
+import uuid
 from fastapi import FastAPI, Request, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+import pandas as pd
 from pydantic import BaseModel
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 import geopandas as gpd
 import numpy as np
 import tempfile
@@ -58,6 +61,10 @@ class UploadResponse(BaseModel):
     bounds: List[float]
     geojson: dict
 
+class MultiUploadResponse(BaseModel):
+    results: Dict[str, UploadResponse]
+
+
 class PairRequest(BaseModel):
     session_id: str
     raw_id: str
@@ -73,7 +80,7 @@ class FeatureInfo(BaseModel):
 # ======================================================================
 
 def load_shapefile_from_zip(zip_file_bytes: bytes, filename: str) -> gpd.GeoDataFrame:
-    """Load shapefile from uploaded ZIP bytes"""
+    """Load shapefile from uploaded ZIP bytes using recursive search"""
     tmp = tempfile.mkdtemp()
     zpath = os.path.join(tmp, filename)
     
@@ -83,12 +90,17 @@ def load_shapefile_from_zip(zip_file_bytes: bytes, filename: str) -> gpd.GeoData
     with zipfile.ZipFile(zpath, "r") as z:
         z.extractall(tmp)
     
-    shp_files = [os.path.join(tmp, f) for f in os.listdir(tmp) if f.endswith(".shp")]
+    # Use glob to find .shp files at any depth
+    # recursive=True combined with **/ allows searching all subdirectories
+    shp_files = glob.glob(os.path.join(tmp, "**", "*.shp"), recursive=True)
     
     if not shp_files:
+        # Clean up is good practice here, but keeping logic consistent with your snippet
         raise HTTPException(status_code=400, detail=f"No .shp file found in {filename}")
     
+    # shp_files[0] will now be the full path to the first .shp found
     gdf = gpd.read_file(shp_files[0], engine="fiona")
+    
     return gdf
 
 def safe_centroid(g):
@@ -171,52 +183,81 @@ def gdf_to_geojson(gdf: gpd.GeoDataFrame, key_col: str) -> dict:
 # ENDPOINTS
 # ======================================================================
 
-@app.post("/upload/raw", response_model=UploadResponse)
-async def upload_raw(request:Request, file: UploadFile = File(...)):
-    """Upload RAW shapefile ZIP"""
+@app.post("/upload/raw", response_model=MultiUploadResponse)
+async def upload_raw(
+    request: Request,
+    files: List[UploadFile] = File(...)
+):
+    """Upload multiple RAW shapefile ZIPs"""
 
-    logger.info("Starting RAW shapefile upload for file: {}", file.filename)
-    try:
-        
-        content = await file.read()
-        logger.debug("File content read successfully. Size: {} bytes", len(content))
-        request.app.state.name = file.filename
-        # Load GeoDataFrame
-        gdf = load_shapefile_from_zip(content, file.filename)
-        logger.info("Shapefile loaded successfully. Feature count: {}", len(gdf))
-        # Store in session (generate unique ID)
-        import uuid
-        session_id = str(uuid.uuid4())
-        logger.debug("Generated session ID: {}", session_id)
-        # Force CRS for display
-        gdf_display = gdf.copy()
-        gdf_display = gdf_display.set_crs(3857, allow_override=True)
-        logger.debug("CRS set to EPSG:3857 for display version.")
+    results: Dict[str, UploadResponse] = {}
 
-        sessions[session_id] = {
-            "raw": gdf,
-            "raw_display": gdf_display,
-            "filename":file.filename
-        }
-        logger.info("GeoDataFrames stored in session: {}", session_id)
-        
-        bounds = gdf_display.total_bounds.tolist()
-        logger.success(
-            "Upload complete for session {}. Features: {}, Bounds: {}",
-            session_id,
-            len(gdf),
-            bounds
-        )
-        return UploadResponse(
-            session_id=session_id,
-            columns=gdf.columns.tolist(),
-            feature_count=len(gdf),
-            bounds=bounds,
-            geojson=gdf_to_geojson(gdf_display, gdf.columns[0])
-        )
-    except Exception as e:
-        logger.exception("An error occurred during RAW shapefile upload for file {}: {}", file.filename, e)
-        raise HTTPException(status_code=500, detail=str(e))
+    merged_gdfs = []
+    filenames = []
+
+
+
+    session_id = str(uuid.uuid4())
+
+   
+    for file in files:
+        logger.info("Starting RAW shapefile upload for file: {}", file.filename)
+
+        try:
+            content = await file.read()
+            logger.debug("File content read. Size: {} bytes", len(content))
+
+            gdf = load_shapefile_from_zip(content, file.filename)
+            logger.info("Shapefile loaded. Feature count: {}", len(gdf))
+
+           
+            gdf_display = gdf.copy()
+            gdf_display = gdf_display.set_crs(3857, allow_override=True)
+            fname = file.filename.split(".")[0]
+            filenames.append(fname)
+            merged_gdfs.append(gdf)
+            bounds = gdf_display.total_bounds.tolist()
+
+            results[fname] = UploadResponse(
+                session_id=session_id,
+                columns=gdf.columns.tolist(),
+                feature_count=len(gdf),
+                bounds=bounds,
+                geojson=gdf_to_geojson(gdf_display, gdf.columns[0])
+            )
+
+            logger.success(
+                "Upload complete for {}. Session: {}",
+                file.filename,
+                session_id
+            )
+
+        except Exception as e:
+            logger.exception(
+                "Error uploading file {}: {}", file.filename, e
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed processing {file.filename}: {str(e)}"
+            )
+    merged_gdf = gpd.GeoDataFrame(
+    pd.concat(merged_gdfs, ignore_index=True),
+
+    )
+
+    
+
+    sessions[session_id] = {
+        "raw": merged_gdf,
+        "raw_display": merged_gdf,
+        "filenames": filenames
+    }
+
+
+   
+    return MultiUploadResponse(results=results)
+
+
 
 @app.post("/upload/ref", response_model=UploadResponse)
 async def upload_ref(session_id: str, file: UploadFile = File(...)):
@@ -321,16 +362,17 @@ async def apply_transformation(r:Request,request: TransformRequest):
         # Compute transformation
         scale, R, t = compute_similarity_transform(raw_pts, ref_pts)
         model = {"scale": scale, "R": R, "t": t}
-        
         # Transform all geometries in the raw dataset
         raw_trans = raw.copy()
+        print(raw.geometry)
         raw_trans["geometry"] = raw.geometry.apply(lambda g: transform_geom(g, model))
         raw_trans = raw_trans.set_crs(4326)
         
         # Create ZIP file with all shapefile components
         outdir = tempfile.mkdtemp()
         
-        filename = os.path.splitext(r.app.state.name)[0]
+        # filename = os.path.splitext(r.app.state.name)[0]
+        filename = "georef"
         shp_path = os.path.join(outdir, f"{filename}_final.shp")
         raw_trans.to_file(shp_path)
         
@@ -352,6 +394,7 @@ async def apply_transformation(r:Request,request: TransformRequest):
         )
         
     except Exception as e:
+        print(str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 

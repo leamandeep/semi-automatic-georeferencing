@@ -2,9 +2,13 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
 export const api = {
-  async uploadRaw(file: string | Blob) {
+  async uploadRaw(files:Array<Blob>) {
     const formData = new FormData();
-    formData.append('file', file);
+
+
+    for (const file of files) {
+      formData.append("files", file);
+    }
 
     const response = await fetch(`${API_BASE_URL}/upload/raw`, {
       method: 'POST',
@@ -82,8 +86,8 @@ export const api = {
     }
 
     // FIX: Return the WHOLE response so we can read headers in the component
-    return response; 
-},
+    return response;
+  },
 
   async getSessionInfo(sessionId: any) {
     const response = await fetch(`${API_BASE_URL}/session/${sessionId}/info`);

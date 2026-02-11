@@ -15,13 +15,15 @@
    */
   let rawData = null;
   /**
-   * 
+   *
    * @type {{ columns: string | any[]; feature_count: any; geojson: any; bounds: any; } | null}
    */
   let refData = null;
 
   let rawKeyCol = "";
   let refKeyCol = "";
+  let activeRawKey = null; // filename (roads.zip)
+  let activeRaw = null;
 
   /**
    * @type {null}
@@ -44,6 +46,7 @@
     color: string;
     raw: [number, number];
     ref: [number, number];
+    key:string
   };
 
   let pairs: Array<ControlPair> = [];
@@ -54,28 +57,28 @@
    * @param {{ target: { files: any[]; }; }} event
    */
   async function handleRawUpload(event) {
-    const file = event.target.files[0];
-    if (!file) return;
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
 
-    rawFile = file;
     loading = true;
     error = null;
 
     try {
-      const result = await api.uploadRaw(file);
-      sessionId = result.session_id;
-      rawData = result;
+      const result = await api.uploadRaw(files);
 
-      console.log(result);
+      rawData = result.results;
 
-      if (rawData.columns.length > 0) {
-        console.log(rawData?.columns);
-        rawKeyCol = rawData.columns[0];
+      // select first dataset
+      activeRawKey = Object.keys(rawData)[0];
+      activeRaw = rawData[activeRawKey];
+
+      sessionId = activeRaw.session_id;
+
+      if (activeRaw.columns.length > 0) {
+        rawKeyCol = activeRaw.columns[0];
       }
 
-      if (refData) {
-        step = 2;
-      }
+      if (refData) step = 2;
     } catch (err) {
       error = `RAW Upload Error: ${err.message}`;
     } finally {
@@ -120,6 +123,20 @@
     step = 3;
   }
 
+  $: if (rawData && activeRawKey) {
+    activeRaw = rawData[activeRawKey];
+  }
+
+  function handleActiveRaw(event) {
+    // Capture the selected key from the dropdown
+    const selectedKey = event.target.value;
+    activeRawKey = selectedKey;
+    activeRaw = rawData[selectedKey];
+
+    // Optional: Console log to verify it's working
+    console.log(`Switched to: ${activeRawKey}`, activeRaw);
+  }
+
   /**
    * @param {any} plotId
    */
@@ -144,7 +161,6 @@
         (p) => p[0] === selectedRaw && p[1] === selectedRef,
       );
 
-      console.log(pairs);
       if (!exists) {
         // @ts-ignore
         pairs = [...pairs, [selectedRaw, selectedRef]];
@@ -161,32 +177,24 @@
     pairs = pairs?.filter((_, i) => i !== index);
   }
 
-
   type Palette = string;
-let paletteIndex = 0;
+  let paletteIndex = 0;
 
-function nextColor(
-  paletteCount = 12,
-  colorsPerPalette = 5,
-): string {
-  const hueStep = 360 / paletteCount;
-  const lightnessRange = [35, 50, 65, 75, 85];
-  const saturation = 70;
+  function nextColor(paletteCount = 12, colorsPerPalette = 5): string {
+    const hueStep = 360 / paletteCount;
+    const lightnessRange = [35, 50, 65, 75, 85];
+    const saturation = 70;
 
-  const palette = paletteIndex % paletteCount;
-  const color = Math.floor(paletteIndex / paletteCount);
+    const palette = paletteIndex % paletteCount;
+    const color = Math.floor(paletteIndex / paletteCount);
 
-  const hue = Math.round(palette * hueStep);
-  const lightness =
-    lightnessRange[color % lightnessRange.length];
+    const hue = Math.round(palette * hueStep);
+    const lightness = lightnessRange[color % lightnessRange.length];
 
-  paletteIndex++;
+    paletteIndex++;
 
-  return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
-}
-
-
-
+    return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+  }
 
   function tryCreatePair() {
     if (!pendingRaw || !pendingRef) return;
@@ -207,6 +215,7 @@ function nextColor(
           color: nextColor(),
           raw: pendingRaw,
           ref: pendingRef,
+          key: activeRawKey,
         },
       ];
     }
@@ -214,62 +223,58 @@ function nextColor(
     pendingRaw = null;
     pendingRef = null;
   }
-async function applyTransformation() {
-  if (pairs.length < 3) {
-    error = "At least 3 control pairs are required";
-    return;
-  }
-
-  loading = true;
-  error = null;
-  const cleanPairs = pairs.map((p) => [p.raw, p.ref]);
-
-  try {
-    const response = await api.applyTransform(
-      sessionId,
-      rawKeyCol,
-      refKeyCol,
-      cleanPairs,
-    );
-
-    // FIX: Check if response exists before calling .headers
-    if (!response || !response.headers) {
-      throw new Error("No response received from server");
+  async function applyTransformation() {
+    if (pairs.length < 3) {
+      error = "At least 3 control pairs are required";
+      return;
     }
 
-    // 1. Extract filename
-    const disposition = response.headers.get("Content-Disposition");
-    let filename = "georef_final.zip";
+    loading = true;
+    error = null;
+    const cleanPairs = pairs.map((p) => [p.raw, p.ref]);
 
-    if (disposition && disposition.includes("filename=")) {
-      const match = disposition.match(/filename=(?:"([^"]+)"|([^;]+))/);
-      filename = match ? (match[1] || match[2]) : filename;
+    try {
+      const response = await api.applyTransform(
+        sessionId,
+        rawKeyCol,
+        refKeyCol,
+        cleanPairs,
+      );
+
+      // FIX: Check if response exists before calling .headers
+      if (!response || !response.headers) {
+        throw new Error("No response received from server");
+      }
+
+      // 1. Extract filename
+      const disposition = response.headers.get("Content-Disposition");
+      let filename = "georef_final.zip";
+
+      if (disposition && disposition.includes("filename=")) {
+        const match = disposition.match(/filename=(?:"([^"]+)"|([^;]+))/);
+        filename = match ? match[1] || match[2] : filename;
+      }
+
+      // 2. Get the blob
+      const blob = await response.blob();
+
+      // 3. Trigger download
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err) {
+      console.error("Full Error:", err);
+      error = `Transform Error: ${err.message}`;
+    } finally {
+      loading = false;
     }
-
-    // 2. Get the blob
-    const blob = await response.blob();
-
-    // 3. Trigger download
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename; 
-    document.body.appendChild(a);
-    a.click();
-    
-    window.URL.revokeObjectURL(url);
-    document.body.removeChild(a);
-
-  } catch (err) {
-    console.error("Full Error:", err);
-    error = `Transform Error: ${err.message}`;
-  } finally {
-    loading = false;
   }
-}
-
-
-
 
   function reset() {
     rawFile = null;
@@ -277,6 +282,7 @@ async function applyTransformation() {
     sessionId = null;
     rawData = null;
     refData = null;
+    activeRaw = null;
     rawKeyCol = "";
     refKeyCol = "";
     selectedRaw = null;
@@ -315,17 +321,18 @@ async function applyTransformation() {
         <input
           type="file"
           name="raw"
-          class="file-input w-full max-w-xs"
+          class="file-input file-input-xl w-full max-w-xs"
           accept=".zip"
+          multiple
           on:change={handleRawUpload}
           disabled={loading}
         />
-        <label class="label" for="raw">
+        <!-- <label class="label" for="raw">
           <span class="label-text">Max size 200MB</span>
-        </label>
-        {#if rawData}
+        </label> -->
+        {#if activeRaw}
           <div class="text-sm text-success">
-            ✓ Loaded: {rawData.feature_count} features
+            ✓ Loaded: {activeRaw.feature_count} features
           </div>
         {/if}
       </fieldset>
@@ -337,14 +344,14 @@ async function applyTransformation() {
         <input
           type="file"
           name="ref"
-          class="file-input w-full max-w-xs"
+          class="file-input file-input-xl w-full max-w-xs"
           accept=".zip"
           on:change={handleRefUpload}
           disabled={loading || !sessionId}
         />
-        <label class="label" for="ref">
+        <!-- <label class="label" for="ref">
           <span class="label-text">Max size 200MB</span>
-        </label>
+        </label> -->
         {#if refData}
           <div class="text-sm text-success">
             ✓ Loaded: {refData.feature_count} features
@@ -365,9 +372,12 @@ async function applyTransformation() {
             <span class="label-text">RAW Plot Number Column</span>
           </label>
 
-        
-          <select class="select select-bordered" bind:value={rawKeyCol}>
-            {#each rawData?.columns as col}
+          <select
+            class="select select-bordered"
+            bind:value={rawKeyCol}
+            disabled={!activeRaw}
+          >
+            {#each activeRaw?.columns ?? [] as col}
               <option value={col}>{col}</option>
             {/each}
           </select>
@@ -377,7 +387,7 @@ async function applyTransformation() {
           <label class="label" for="ref">
             <span class="label-text">REF Plot Number Column</span>
           </label>
-      
+
           <select class="select select-bordered" bind:value={refKeyCol}>
             {#each refData?.columns as col}
               <option value={col}>{col}</option>
@@ -400,24 +410,31 @@ async function applyTransformation() {
       <h2 class="text-xl font-semibold mb-4">
         Step 1: Select Matching Plot Numbers
       </h2>
+      <select class="select select-bordered" on:change={handleActiveRaw}>
+        {#each Object.keys(rawData) as col}
+          <option value={col}>{col}</option>
+        {/each}
+      </select>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div class="card bg-base-200 shadow-xl">
           <div class="card-body">
             <h3 class="card-title text-red-600">🟥 RAW Map</h3>
-            <Map
-              {sessionId}
-              mapType="raw"
-              keyCol={rawKeyCol}
-              geojson={rawData?.geojson}
-              bounds={rawData?.bounds}
-              {pairs}
-              onSelect={(coords) => {
-                pendingRaw = coords;
-                tryCreatePair();
-              }}
-              selectedPoint={selectedRaw}
-            />
+            {#key activeRawKey}
+              <Map
+                {sessionId}
+                mapType="raw"
+                keyCol={rawKeyCol}
+                geojson={activeRaw?.geojson}
+                bounds={activeRaw?.bounds}
+                {pairs}
+                onSelect={(coords) => {
+                  pendingRaw = coords;
+                  tryCreatePair();
+                }}
+                selectedPoint={selectedRaw}
+              />
+            {/key}
           </div>
         </div>
 
@@ -454,6 +471,7 @@ async function applyTransformation() {
                     <th>color</th>
                     <th>RAW</th>
                     <th>REF</th>
+                    <th>key</th>
                     <th>Action</th>
                   </tr>
                 </thead>
@@ -478,8 +496,13 @@ async function applyTransformation() {
                           />
                         </svg></td
                       >
-                      <td>{"(" +pair["raw"][0] +","+ pair["raw"][1] +")"}</td>
-                      <td>{"(" +pair["ref"][0] +","+ pair["ref"][1] +")"}</td>
+                      <td
+                        >{"(" + pair["raw"][0] + "," + pair["raw"][1] + ")"}</td
+                      >
+                      <td
+                        >{"(" + pair["ref"][0] + "," + pair["ref"][1] + ")"}</td
+                      >
+                      <td>{pair['key']}</td>
                       <td>
                         <!-- <button class="btn btn-xs btn-info"> zoom </button> -->
                         <button
